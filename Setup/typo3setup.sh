@@ -71,6 +71,35 @@ require_cmd() {
     }
 }
 
+ensure_composer() {
+    if command -v composer >/dev/null 2>&1; then
+        return 0
+    fi
+
+    echoG 'Installing Composer'
+    if [ "${OSNAME}" = 'ubuntu' ] || [ "${OSNAME}" = 'debian' ]; then
+        apt-get update > /dev/null 2>&1
+        DEBIAN_FRONTEND=noninteractive apt-get -y install composer > /dev/null 2>&1 || true
+    else
+        yum -y install composer > /dev/null 2>&1 || true
+    fi
+
+    if command -v composer >/dev/null 2>&1; then
+        return 0
+    fi
+
+    if ! command -v php >/dev/null 2>&1; then
+        echoR 'Composer installation fallback requires php command in PATH'
+        exit 1
+    fi
+
+    cd /tmp
+    curl -sS https://getcomposer.org/installer -o composer-setup.php
+    php composer-setup.php --install-dir=/usr/local/bin --filename=composer > /dev/null 2>&1
+    rm -f composer-setup.php
+    require_cmd composer
+}
+
 linechange(){
     LINENUM=$(grep -n "${1}" ${2} | cut -d: -f 1)
     if [ -n "$LINENUM" ] && [ "$LINENUM" -eq "$LINENUM" ] 2>/dev/null; then
@@ -229,7 +258,7 @@ restart_lsws(){
 }
 
 centos_install_basic(){
-    yum -y install wget unzip > /dev/null 2>&1
+    yum -y install wget unzip curl > /dev/null 2>&1
 }
 
 centos_install_ols(){
@@ -263,7 +292,7 @@ centos_install_certbot(){
 } 
 
 ubuntu_install_basic(){
-    apt-get -y install wget unzip ufw > /dev/null 2>&1
+    apt-get -y install wget unzip curl ufw > /dev/null 2>&1
 }
 
 ubuntu_install_ols(){
@@ -664,6 +693,7 @@ typo3_main_config(){
     compatible_mariadb_cmd
     config_mysql
     rm_wordpress
+    ensure_composer
     install_typo3
     set_htaccess
     db_password_file
