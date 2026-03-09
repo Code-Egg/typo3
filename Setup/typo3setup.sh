@@ -64,6 +64,13 @@ echoR()
     echo -e "\033[38;5;203m${1}\033[39m"
 }
 
+require_cmd() {
+    command -v "$1" >/dev/null 2>&1 || {
+        echoR "Missing required command: $1"
+        exit 1
+    }
+}
+
 linechange(){
     LINENUM=$(grep -n "${1}" ${2} | cut -d: -f 1)
     if [ -n "$LINENUM" ] && [ "$LINENUM" -eq "$LINENUM" ] 2>/dev/null; then
