@@ -540,6 +540,7 @@ install_typo3(){
   require_cmd composer
 
   cd "$SITE_DIR"
+  COMPOSER_ALLOW_SUPERUSER=1
   composer create-project typo3/cms-base-distribution:"${TYPO3_VERSION}" . --no-interaction
 
   chown -R ${USER}:${GROUP} "$SITE_DIR"
