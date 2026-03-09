@@ -5,25 +5,29 @@ function usage
 {
     echo 'Usage:'
     echo '  bash typo3setup.sh'
-    echo '  DB_NAME=typo3db DB_USER=typo3user DB_PASS='StrongPass' DOMAIN=example.com bash typo3setup.sh'
+    echo "  DB_NAME=typo3db DB_USER=typo3user DB_PASS='StrongPass' DOMAIN=example.com bash typo3setup.sh"
+    echo '  bash typo3setup.sh -H | --help'
 }
 
+if [[ "${1:-}" = "-H" || "${1:-}" = "--help" ]]; then
+    usage
+    exit 0
+fi
+
 if [[ "${EUID}" -ne 0 ]]; then
-  echo "Please run as root (use sudo)."
-  exit 1
+    echo "Please run as root (use sudo)."
+    exit 1
 fi
 
 export DEBIAN_FRONTEND=noninteractive
 
 
-#!/usr/bin/env bash
 # /********************************************************************
 # LiteSpeed WordPress setup Script
 # @Author:   LiteSpeed Technologies, Inc. (https://www.litespeedtech.com)
 # *********************************************************************/
 LSWSFD='/usr/local/lsws'
-#DOCHM='/var/www/html.old'
-DOCHM='/var/www/html/'
+DOCHM='/var/www/html.old'
 DOCLAND='/var/www/html'
 PHPCONF='/var/www/phpmyadmin'
 LSWSVCONF="${LSWSFD}/conf/vhosts"
@@ -34,6 +38,7 @@ PHPVERD=8.4
 TYPO3_VERSION="${TYPO3_VERSION:-^12.4}"
 PHPVERD="${PHPVERD:-8.4}"
 PHPVER=$(echo ${PHPVERD//./})
+SITE_DIR="${SITE_DIR:-${DOCLAND}}"
 PHP_MV=$(cut -d "." -f1 <<< ${PHPVER})
 PHP_SV=$(cut -d "." -f2 <<< ${PHPVER})
 PHPINICONF="${LSWSFD}/lsphp${PHPVER}/etc/php/${PHPVERD}/litespeed/php.ini"
@@ -342,10 +347,10 @@ rewrite  {
   autoLoadHtaccess        1
 }
 END
-    if [ -d ${LSWSVCONF}/wordpress ] && [ ! -d ${LSWSVCONF}/joomla ]; then 
-        mv ${LSWSVCONF}/wordpress ${LSWSVCONF}/joomla  
+    if [ -d ${LSWSVCONF}/wordpress ] && [ ! -d ${LSWSVCONF}/typo3 ]; then
+        mv ${LSWSVCONF}/wordpress ${LSWSVCONF}/typo3
     fi
-    sed -i "s/wordpress/joomla/g" ${LSWSCONF}
+    sed -i "s/wordpress/typo3/g" ${LSWSCONF}
     echoG 'Finish Web Server config'
 }
 
@@ -393,10 +398,10 @@ rewrite  {
   autoLoadHtaccess        1
 }
 END
-    if [ -d ${LSWSVCONF}/wordpress ] && [ ! -d ${LSWSVCONF}/joomla ]; then 
-        mv ${LSWSVCONF}/wordpress ${LSWSVCONF}/joomla  
+    if [ -d ${LSWSVCONF}/wordpress ] && [ ! -d ${LSWSVCONF}/typo3 ]; then
+        mv ${LSWSVCONF}/wordpress ${LSWSVCONF}/typo3
     fi
-    sed -i "s/wordpress/joomla/g" ${LSWSCONF}
+    sed -i "s/wordpress/typo3/g" ${LSWSCONF}
     echoG 'Finish Web Server config'
 }
 
@@ -434,7 +439,7 @@ config_mysql(){
     echoG 'Setting DataBase'
     get_sql_ver
     if [ -f ${DBPASSPATH} ]; then 
-        EXISTSQLPASS=$(grep root_mysql_passs ${HMPATH}/.db_password | awk -F '"' '{print $2}'); 
+        EXISTSQLPASS=$(grep root_mysql_pass ${HMPATH}/.db_password | awk -F '"' '{print $2}');
     fi    
     if [ "${EXISTSQLPASS}" = '' ]; then
         if (( ${SQL_MAINV} >=10 )) && (( ${SQL_SECV} >=4 )); then
@@ -449,7 +454,7 @@ config_mysql(){
             "${mysql}" -u root -p${EXISTSQLPASS} \
                 -e "ALTER USER root@localhost IDENTIFIED VIA mysql_native_password USING PASSWORD('${root_mysql_pass}');"
         else        
-            "${mysql}" -u root -p${EXISTSQLPASS} \     
+            "${mysql}" -u root -p${EXISTSQLPASS} \
                 -e "update mysql.user set authentication_string=password('${root_mysql_pass}') where user='root';" 
         fi        
     fi
@@ -466,10 +471,10 @@ END
 }
 
 set_htaccess(){
-    if [ ! -f ${DOCHM}/public/.htaccess ]; then 
-        touch ${DOCHM}/public/.htaccess
+    if [ ! -f ${DOCLAND}/public/.htaccess ]; then
+        touch ${DOCLAND}/public/.htaccess
     fi   
-    cat << EOM > ${DOCHM}/public/.htaccess
+    cat << EOM > ${DOCLAND}/public/.htaccess
 <IfModule LiteSpeed>
 RewriteEngine On
 RewriteRule ^(?:fileadmin/|typo3conf/|typo3temp/|uploads/|favicon\.ico|robots\.txt) - [L]
@@ -501,20 +506,22 @@ install_typo3(){
   cd "$SITE_DIR"
   composer create-project typo3/cms-base-distribution:"${TYPO3_VERSION}" . --no-interaction
 
-  chown -R nobody:nogroup "$SITE_DIR"
+  chown -R ${USER}:${GROUP} "$SITE_DIR"
   find "$SITE_DIR" -type d -exec chmod 755 {} \;
   find "$SITE_DIR" -type f -exec chmod 644 {} \;
 
   mkdir -p "$SITE_DIR/public/fileadmin" "$SITE_DIR/var"
   touch "$SITE_DIR/public/FIRST_INSTALL"
-  chown -R nobody:nogroup "$SITE_DIR/public/fileadmin" "$SITE_DIR/var"
+  chown -R ${USER}:${GROUP} "$SITE_DIR/public/fileadmin" "$SITE_DIR/var"
 }
 
 
 rm_wordpress(){
     echoG 'Remove WordPress'
-    rm -rf ${DOCHM}/*
-    rm -f ${DOCHM}/.htaccess
+    if [ -n "${DOCHM}" ] && [ "${DOCHM}" != "/" ] && [ -d "${DOCHM}" ]; then
+        rm -rf "${DOCHM}"/*
+        rm -f "${DOCHM}/.htaccess"
+    fi
 }
 
 
@@ -549,8 +556,12 @@ centos_firewall_add(){
     else 
         echoR 'Please check firewalld rules'    
     fi  
-    if [ ${PROVIDER} = 'oracle' ]; then 
-        oci_iptables
+    if [ ${PROVIDER} = 'oracle' ]; then
+        if declare -F oci_iptables >/dev/null 2>&1; then
+            oci_iptables
+        else
+            echoR 'oci_iptables function is not defined; skip OCI iptables customization'
+        fi
     fi           
 }
 
@@ -647,6 +658,7 @@ typo3_main_config(){
     config_mysql
     rm_wordpress
     install_typo3
+    set_htaccess
     db_password_file
     update_final_permission
     restart_lsws
