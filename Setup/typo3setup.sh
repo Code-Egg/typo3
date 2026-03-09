@@ -34,7 +34,6 @@ LSWSVCONF="${LSWSFD}/conf/vhosts"
 LSWSCONF="${LSWSFD}/conf/httpd_config.conf"
 WPVHCONF="${LSWSFD}/conf/vhosts/wordpress/vhconf.conf"
 EXAMPLECONF="${LSWSFD}/conf/vhosts/wordpress/vhconf.conf"
-PHPVERD=8.4
 TYPO3_VERSION="${TYPO3_VERSION:-^12.4}"
 PHPVERD="${PHPVERD:-8.4}"
 PHPVER=$(echo ${PHPVERD//./})
@@ -77,22 +76,6 @@ ensure_composer() {
     fi
 
     echoG 'Installing Composer'
-    if [ "${OSNAME}" = 'ubuntu' ] || [ "${OSNAME}" = 'debian' ]; then
-        apt-get update > /dev/null 2>&1
-        DEBIAN_FRONTEND=noninteractive apt-get -y install composer > /dev/null 2>&1 || true
-    else
-        yum -y install composer > /dev/null 2>&1 || true
-    fi
-
-    if command -v composer >/dev/null 2>&1; then
-        return 0
-    fi
-
-    if ! command -v php >/dev/null 2>&1; then
-        echoR 'Composer installation fallback requires php command in PATH'
-        exit 1
-    fi
-
     cd /tmp
     curl -sS https://getcomposer.org/installer -o composer-setup.php
     php composer-setup.php --install-dir=/usr/local/bin --filename=composer > /dev/null 2>&1
@@ -252,6 +235,7 @@ install_ols_wp(){
 
 restart_lsws(){
     echoG 'Restart LiteSpeed Web Server'
+    rm -rf /tmp/lshttpd
     ${LSWSFD}/bin/lswsctrl stop >/dev/null 2>&1
     systemctl stop lsws >/dev/null 2>&1
     systemctl start lsws >/dev/null 2>&1
@@ -350,7 +334,7 @@ centos_config_ols(){
     sed -i '/errorlog logs\/error.log/a \ \ \ \ \ \ \ \ keepDays             1' ${LSWSCONF}
     sed -i 's/maxStaleAge         200/maxStaleAge         0/g' ${LSWSCONF}
     cat > ${WPVHCONF} <<END 
-docRoot                   ${DOCLAND}/
+docRoot                   ${DOCLAND}/public/
 
 index  {
   useServer               0
@@ -401,7 +385,7 @@ ubuntu_config_ols(){
     sed -i '/errorlog logs\/error.log/a \ \ \ \ \ \ \ \ keepDays             1' ${LSWSCONF}
     sed -i 's/maxStaleAge         200/maxStaleAge         0/g' ${LSWSCONF}
     cat > ${WPVHCONF} <<END 
-docRoot                   ${DOCLAND}/
+docRoot                   ${DOCLAND}/public/
 
 index  {
   useServer               0
@@ -461,6 +445,8 @@ config_php(){
     linechange 'post_max_size' ${PHPINICONF} "${NEWKEY}"
     NEWKEY='upload_max_filesize = 64M'
     linechange 'upload_max_filesize' ${PHPINICONF} "${NEWKEY}"
+    NEWKEY='max_inputs_vars = 1500'
+    linechange 'max_input_vars' ${PHPINICONF} "${NEWKEY}"    
     echoG 'Finish PHP Paremeter'
 }
 
@@ -540,8 +526,9 @@ install_typo3(){
   require_cmd composer
 
   cd "$SITE_DIR"
-  COMPOSER_ALLOW_SUPERUSER=1
-  composer create-project typo3/cms-base-distribution:"${TYPO3_VERSION}" . --no-interaction
+  export COMPOSER_ALLOW_SUPERUSER=1
+  ${LSWSFD}/lsphp${PHPVER}/bin/php /usr/local/bin/composer \
+    create-project typo3/cms-base-distribution:"${TYPO3_VERSION}" . --no-interaction
 
   chown -R ${USER}:${GROUP} "$SITE_DIR"
   find "$SITE_DIR" -type d -exec chmod 755 {} \;
@@ -683,20 +670,13 @@ ubuntu_main_config(){
     typo3_main_config 
 }
 
-wp_config(){
-    install_wp_plugin
-    set_htaccess
-    get_theme_name
-    set_lscache
-}
-
 typo3_main_config(){
     compatible_mariadb_cmd
     config_mysql
     rm_wordpress
     ensure_composer
     install_typo3
-    set_htaccess
+    #set_htaccess
     db_password_file
     update_final_permission
     restart_lsws
