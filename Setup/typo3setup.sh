@@ -15,117 +15,484 @@ fi
 
 export DEBIAN_FRONTEND=noninteractive
 
-DB_NAME="${DB_NAME:-typo3db}"
-DB_USER="${DB_USER:-typo3user}"
-DB_PASS="${DB_PASS:-$(tr -dc A-Za-z0-9 </dev/urandom | head -c 20)}"
-SITE_DIR="${SITE_DIR:-/var/www/vhosts/localhost/html}"
-TYPO3_VERSION="${TYPO3_VERSION:-^12.4}"
-DOMAIN="${DOMAIN:-localhost}"
-PHP_VER="${PHP_VER:-8.2}"
-LSWSFD="${LSWSFD:-/usr/local/lsws}"
-DOCHM="${DOCHM:-/var/www/html.old}"
-DOCLAND="${DOCLAND:-/var/www/html}"
-PHPCONF="${PHPCONF:-/var/www/phpmyadmin}"
-LSWSVCONF="${LSWSVCONF:-${LSWSFD}/conf/vhosts}"
-LSWSCONF="${LSWSCONF:-${LSWSFD}/conf/httpd_config.conf}"
-WPVHCONF="${WPVHCONF:-${LSWSFD}/conf/vhosts/wordpress/vhconf.conf}"
-EXAMPLECONF="${EXAMPLECONF:-${LSWSFD}/conf/vhosts/wordpress/vhconf.conf}"
-PHPVERD="${PHPVERD:-8.4}"
 
-log() {
-  printf "\n==> %s\n" "$1"
+#!/usr/bin/env bash
+# /********************************************************************
+# LiteSpeed WordPress setup Script
+# @Author:   LiteSpeed Technologies, Inc. (https://www.litespeedtech.com)
+# *********************************************************************/
+LSWSFD='/usr/local/lsws'
+#DOCHM='/var/www/html.old'
+DOCHM='/var/www/html/'
+DOCLAND='/var/www/html'
+PHPCONF='/var/www/phpmyadmin'
+LSWSVCONF="${LSWSFD}/conf/vhosts"
+LSWSCONF="${LSWSFD}/conf/httpd_config.conf"
+WPVHCONF="${LSWSFD}/conf/vhosts/wordpress/vhconf.conf"
+EXAMPLECONF="${LSWSFD}/conf/vhosts/wordpress/vhconf.conf"
+PHPVERD=8.4
+TYPO3_VERSION="${TYPO3_VERSION:-^12.4}"
+PHPVERD="${PHPVERD:-8.4}"
+PHPVER=$(echo ${PHPVERD//./})
+PHP_MV=$(cut -d "." -f1 <<< ${PHPVER})
+PHP_SV=$(cut -d "." -f2 <<< ${PHPVER})
+PHPINICONF="${LSWSFD}/lsphp${PHPVER}/etc/php/${PHPVERD}/litespeed/php.ini"
+MARIADBSERVICE='/lib/systemd/system/mariadb.service'
+MARIADBCNF='/etc/mysql/mariadb.conf.d/60-server.cnf'
+PACKAGEJOOMA='https://downloads.joomla.org/cms/joomla6/6-0-1/Joomla_6-0-1-Stable-Full_Package.zip'
+FIREWALLLIST="22 80 443"
+USER='www-data'
+GROUP='www-data'
+root_mysql_pass=$(openssl rand -hex 24)
+ALLERRORS=0
+EXISTSQLPASS=''
+NOWPATH=$(pwd)
+
+echoY() {
+    echo -e "\033[38;5;148m${1}\033[39m"
+}
+echoG() {
+    echo -e "\033[38;5;71m${1}\033[39m"
+}
+echoR()
+{
+    echo -e "\033[38;5;203m${1}\033[39m"
 }
 
-require_cmd() {
-  command -v "$1" >/dev/null 2>&1 || {
-    echo "Missing required command: $1"
-    exit 1
+linechange(){
+    LINENUM=$(grep -n "${1}" ${2} | cut -d: -f 1)
+    if [ -n "$LINENUM" ] && [ "$LINENUM" -eq "$LINENUM" ] 2>/dev/null; then
+        sed -i "${LINENUM}d" ${2}
+        sed -i "${LINENUM}i${3}" ${2}
+    fi  
+}
+
+check_sql_ver(){    
+    if (( ${SQL_MAINV} >=11 && ${SQL_MAINV}<=99 )); then
+        echoG '[OK] Mariadb version -ge 11'
+    elif (( ${SQL_MAINV} >=10 )) && (( ${SQL_SECV} >=3 )); then
+        echoG '[OK] Mariadb version -ge 10.3'
+    else
+        echoR "Mariadb version ${SQLDBVER} is lower than 10.3, please check!"    
+    fi     
+}
+
+
+check_os()
+{
+    if [ -f /etc/redhat-release ] ; then
+        OSNAME=centos
+        USER='nobody'
+        GROUP='nobody'
+        PHPINICONF="${LSWSFD}/lsphp${PHPVER}/etc/php.ini"
+        MARIADBCNF='/etc/my.cnf.d/60-server.cnf'
+        OSVER=$(cat /etc/redhat-release | awk '{print substr($4,1,1)}')
+    elif [ -f /etc/lsb-release ] ; then
+        OSNAME=ubuntu
+        OSNAMEVER="UBUNTU$(lsb_release -sr | awk -F '.' '{print $1}')" 
+    elif [ -f /etc/debian_version ] ; then
+        OSNAME=debian
+    fi         
+}
+
+providerck()
+{
+    if [ -e /sys/devices/virtual/dmi/id/product_uuid ] && [[ "$(sudo cat /sys/devices/virtual/dmi/id/product_uuid | cut -c 1-3)" =~ (EC2|ec2) ]]; then 
+        PROVIDER='aws'
+    elif [ "$(dmidecode -s bios-vendor)" = 'Google' ];then
+        PROVIDER='google'      
+    elif [ "$(dmidecode -s bios-vendor)" = 'DigitalOcean' ];then
+        PROVIDER='do'
+    elif [ "$(dmidecode -s bios-vendor)" = 'Vultr' ];then
+        PROVIDER='vultr'        
+    elif [ "$(dmidecode -s system-product-name | cut -c 1-7)" = 'Alibaba' ];then
+        PROVIDER='aliyun'
+    elif [ "$(dmidecode -s system-manufacturer)" = 'Microsoft Corporation' ];then    
+        PROVIDER='azure'
+    elif [ -e /etc/oracle-cloud-agent/ ]; then
+        PROVIDER='oracle'
+    else
+        PROVIDER='undefined'  
+    fi
+}
+
+oshmpath()
+{
+    if [ ${PROVIDER} = 'aws' ] && [ -d /home/ubuntu ]; then 
+        HMPATH='/home/ubuntu'
+    elif [ ${PROVIDER} = 'google' ] && [ -d /home/ubuntu ]; then 
+        HMPATH='/home/ubuntu'
+    elif [ ${PROVIDER} = 'aliyun' ] && [ -d /home/ubuntu ]; then
+        HMPATH='/home/ubuntu'
+    elif [ ${PROVIDER} = 'oracle' ] && [ -d /home/ubuntu ]; then
+        HMPATH='/home/ubuntu'        
+    else
+        HMPATH='/root'
+    fi
+    DBPASSPATH="${HMPATH}/.db_password"
+}
+
+change_owner(){
+  chown -R ${USER}:${GROUP} ${1}
+}
+
+prepare(){
+    mkdir -p "${DOCLAND}"
+    change_owner /var/www
+}
+
+compatible_mariadb_cmd()
+{
+    if [ -e /usr/bin/mariadb ]; then
+        mysqladmin='mariadb-admin'
+        mysql='mariadb'
+    else
+        mysqladmin='mysql-admin'
+        mysql='mysql'    
+    fi    
+}
+
+get_sql_ver(){
+    SQLDBVER=$(${mysql} -V | awk '{match($0,"([^ ]+)-MariaDB",a)}END{print a[1]}')
+    SQL_MAINV=$(echo ${SQLDBVER} | awk -F '.' '{print $1}')
+    SQL_SECV=$(echo ${SQLDBVER} | awk -F '.' '{print $2}')
+}
+
+system_upgrade() {
+    echoG 'Updating system'
+    if [ "${OSNAME}" = 'ubuntu' ] || [ "${OSNAME}" = 'debian' ]; then 
+        apt-get update > /dev/null 2>&1
+        echo -ne '#####                     (33%)\r'
+        DEBIAN_FRONTEND=noninteractive apt-get -y -o Dpkg::Options::='--force-confdef' -o Dpkg::Options::='--force-confold' upgrade > /dev/null 2>&1
+        echo -ne '#############             (66%)\r'
+        DEBIAN_FRONTEND=noninteractive apt-get -y -o Dpkg::Options::='--force-confdef' -o Dpkg::Options::='--force-confold' dist-upgrade > /dev/null 2>&1
+        echo -ne '####################      (99%)\r'
+        apt-get clean > /dev/null 2>&1
+        apt-get autoclean > /dev/null 2>&1
+        echo -ne '#######################   (100%)\r'
+    else
+        echo -ne '#                         (5%)\r'
+        yum update -y > /dev/null 2>&1
+        echo -ne '#######################   (100%)\r'
+    fi    
+}
+
+wp_conf_path(){
+    if [ -f "${LSWSCONF}" ]; then 
+        if [ ! -f $(grep 'configFile.*wordpress' "${LSWSCONF}" | awk '{print $2}') ]; then 
+            WPVHCONF="${EXAMPLECONF}"
+        fi
+    else
+        echo 'Can not find LSWS Config, exit script'
+        exit 1    
+    fi
+}
+
+rm_dummy(){
+    echoG 'Remove dummy file'
+    rm -f "/tmp/example.csr" "/tmp/privkey.pem"
+}
+
+install_ols_wp(){
+    cd /tmp/; wget -q https://raw.githubusercontent.com/litespeedtech/ols1clk/master/ols1clk.sh
+    chmod +x ols1clk.sh
+    echo 'Y' | bash ols1clk.sh \
+    --lsphp ${PHPVER} \
+    --wordpress \
+    --wordpresspath ${DOCHM} \
+    --dbrootpassword ${root_mysql_pass} \
+    --dbname typo3 \
+    --dbuser typo3 \
+    --dbpassword typo3
+    rm -f ols1clk.sh
+    wp_conf_path
+    rm_dummy
+}
+
+restart_lsws(){
+    echoG 'Restart LiteSpeed Web Server'
+    ${LSWSFD}/bin/lswsctrl stop >/dev/null 2>&1
+    systemctl stop lsws >/dev/null 2>&1
+    systemctl start lsws >/dev/null 2>&1
+}
+
+centos_install_basic(){
+    yum -y install wget unzip > /dev/null 2>&1
+}
+
+centos_install_ols(){
+    install_ols_wp
+}
+
+centos_install_php(){
+    echoG 'Install lsphp extensions'
+    yum -y install lsphp${PHPVER}-opcache lsphp${PHPVER}-imagick > /dev/null 2>&1
+}
+
+centos_install_certbot(){
+    echoG "Install CertBot" 
+    if [ ${OSVER} = 8 ]; then
+        wget -q https://dl.eff.org/certbot-auto
+        mv certbot-auto /usr/local/bin/certbot
+        chown root /usr/local/bin/certbot
+        chmod 0755 /usr/local/bin/certbot
+        echo "y" | /usr/local/bin/certbot > /dev/null 2>&1
+    else
+        yum -y install certbot  > /dev/null 2>&1
+    fi
+    if [ -e /usr/bin/certbot ] || [ -e /usr/local/bin/certbot ]; then 
+        if [ ! -e /usr/bin/certbot ]; then
+            ln -s /usr/local/bin/certbot /usr/bin/certbot
+        fi
+        echoG 'Install CertBot finished'
+    else 
+        echoR 'Please check CertBot'    
+    fi    
+} 
+
+ubuntu_install_basic(){
+    apt-get -y install wget unzip ufw > /dev/null 2>&1
+}
+
+ubuntu_install_ols(){
+    install_ols_wp
+}
+
+ubuntu_install_php(){
+    echoG 'Install lsphp extensions'
+    apt-get -y install lsphp${PHPVER}-opcache lsphp${PHPVER}-imagick > /dev/null 2>&1
+}
+
+ubuntu_install_postfix(){
+    echoG 'Install Postfix'
+    DEBIAN_FRONTEND='noninteractive' apt-get -y -o Dpkg::Options::='--force-confdef' \
+    -o Dpkg::Options::='--force-confold' install postfix > /dev/null 2>&1
+}
+
+ubuntu_install_certbot(){       
+    echoG "Install CertBot" 
+    if [ "${OSNAMEVER}" = 'UBUNTU18' ]; then
+        add-apt-repository universe > /dev/null 2>&1
+        echo -ne '\n' | add-apt-repository ppa:certbot/certbot > /dev/null 2>&1
+    fi    
+    apt-get update > /dev/null 2>&1
+    apt-get -y install certbot > /dev/null 2>&1
+    if [ -e /usr/bin/certbot ] || [ -e /usr/local/bin/certbot ]; then 
+        if [ ! -e /usr/bin/certbot ]; then
+            ln -s /usr/local/bin/certbot /usr/bin/certbot
+        fi    
+        echoG 'Install CertBot finished'    
+    else 
+        echoR 'Please check CertBot'    
+    fi    
+}
+
+install_phpmyadmin(){
+    if [ ! -f ${PHPCONF}/changelog.php ]; then 
+        cd /tmp/ 
+        echoG 'Download phpmyadmin'
+        wget -q https://www.phpmyadmin.net/downloads/phpMyAdmin-latest-all-languages.zip
+        unzip phpMyAdmin-latest-all-languages.zip > /dev/null 2>&1
+        rm -f phpMyAdmin-latest-all-languages.zip
+        echoG "move phpmyadmin to ${PHPCONF}"
+        mv phpMyAdmin-*-all-languages ${PHPCONF}
+        mv ${PHPCONF}/config.sample.inc.php ${PHPCONF}/config.inc.php
+    fi
+    change_owner ${PHPCONF}
+}  
+
+centos_config_ols(){
+    echoG 'Setting Web Server config'
+    yum -y install --reinstall openlitespeed > /dev/null 2>&1   
+    NEWKEY='  vhRoot                  /var/www/html'
+    linechange 'www/html' ${LSWSCONF} "${NEWKEY}"
+    sed -i '/errorlog logs\/error.log/a \ \ \ \ \ \ \ \ keepDays             1' ${LSWSCONF}
+    sed -i 's/maxStaleAge         200/maxStaleAge         0/g' ${LSWSCONF}
+    cat > ${WPVHCONF} <<END 
+docRoot                   ${DOCLAND}/
+
+index  {
+  useServer               0
+  indexFiles              index.php index.html
+}
+
+context /phpmyadmin/ {
+  location                ${PHPCONF}/
+  allowBrowse             1
+  indexFiles              index.php
+
+  accessControl  {
+    allow                 *
+  }
+
+  rewrite  {
+    enable                0
+    inherit               0
+
+  }
+  addDefaultCharset       off
+
+  phpIniOverride  {
+
   }
 }
 
-configure_ols_repo() {
-  apt-get update
-  apt-get install -y ca-certificates curl gnupg lsb-release
-
-  if [[ ! -f /etc/apt/trusted.gpg.d/lst_debian_repo.gpg ]]; then
-    curl -fsSL https://repo.litespeed.sh | bash
-  fi
+rewrite  {
+  enable                1
+  autoLoadHtaccess        1
+}
+END
+    if [ -d ${LSWSVCONF}/wordpress ] && [ ! -d ${LSWSVCONF}/joomla ]; then 
+        mv ${LSWSVCONF}/wordpress ${LSWSVCONF}/joomla  
+    fi
+    sed -i "s/wordpress/joomla/g" ${LSWSCONF}
+    echoG 'Finish Web Server config'
 }
 
-install_packages() {
-  apt-get update
+ubuntu_config_ols(){
+    echoG 'Setting Web Server config'
+    sed -i "s/nobody/${USER}/g" ${LSWSCONF}
+    sed -i "s/nogroup/${GROUP}/g" ${LSWSCONF}
+    DEBIAN_FRONTEND=noninteractive apt-get -o Dpkg::Options::='--force-confdef' \
+        -o Dpkg::Options::='--force-confold' -y install --reinstall openlitespeed > /dev/null 2>&1
+    NEWKEY='  vhRoot                  /var/www/html'
+    linechange 'www/html' ${LSWSCONF} "${NEWKEY}"
+    sed -i '/errorlog logs\/error.log/a \ \ \ \ \ \ \ \ keepDays             1' ${LSWSCONF}
+    sed -i 's/maxStaleAge         200/maxStaleAge         0/g' ${LSWSCONF}
+    cat > ${WPVHCONF} <<END 
+docRoot                   ${DOCLAND}/
 
-  apt-get install -y \
-    openlitespeed \
-    mariadb-server \
-    curl \
-    unzip \
-    git \
-    software-properties-common
-
-  apt-get install -y \
-    lsphp${PHP_VER/./} \
-    lsphp${PHP_VER/./}-common \
-    lsphp${PHP_VER/./}-mysql \
-    lsphp${PHP_VER/./}-curl \
-    lsphp${PHP_VER/./}-intl \
-    lsphp${PHP_VER/./}-zip \
-    lsphp${PHP_VER/./}-xml \
-    lsphp${PHP_VER/./}-gd \
-    lsphp${PHP_VER/./}-mbstring \
-    lsphp${PHP_VER/./}-opcache \
-    lsphp${PHP_VER/./}-soap \
-    lsphp${PHP_VER/./}-bcmath \
-    lsphp${PHP_VER/./}-imagick \
-    lsphp${PHP_VER/./}-redis \
-    lsphp${PHP_VER/./}-sodium \
-    composer
+index  {
+  useServer               0
+  indexFiles              index.php index.html
 }
 
-configure_php_handler() {
-  local ols_conf="/usr/local/lsws/conf/httpd_config.conf"
+context /phpmyadmin/ {
+  location                ${PHPCONF}
+  allowBrowse             1
+  indexFiles              index.php
 
-  if ! grep -q "lsphp${PHP_VER/./}" "$ols_conf"; then
-    cat >>"$ols_conf" <<EOF
+  accessControl  {
+    allow                 *
+  }
 
-extprocessor lsphp${PHP_VER/./} {
-  type                    lsapi
-  address                 uds://tmp/lshttpd/lsphp${PHP_VER/./}.sock
-  maxConns                35
-  env                     PHP_LSAPI_CHILDREN=35
-  initTimeout             60
-  retryTimeout            0
-  persistConn             1
-  respBuffer              0
-  autoStart               1
-  path                    /usr/local/lsws/lsphp${PHP_VER/./}/bin/lsphp
-  backlog                 100
-  instances               1
-  extUser                 nobody
-  extGroup                nogroup
-  memSoftLimit            2047M
-  memHardLimit            2047M
-  procSoftLimit           400
-  procHardLimit           500
+  rewrite  {
+    enable                0
+    inherit               0
+
+  }
+  addDefaultCharset       off
+
+  phpIniOverride  {
+
+  }
 }
 
-scriptHandler {
-  add                     lsapi:lsphp${PHP_VER/./} php
+rewrite  {
+  enable                1
+  autoLoadHtaccess        1
 }
-EOF
-  fi
-}
-
-configure_db() {
-  mysql -uroot <<EOF
-CREATE DATABASE IF NOT EXISTS \`${DB_NAME}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-CREATE USER IF NOT EXISTS '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASS}';
-GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO '${DB_USER}'@'localhost';
-FLUSH PRIVILEGES;
-EOF
+END
+    if [ -d ${LSWSVCONF}/wordpress ] && [ ! -d ${LSWSVCONF}/joomla ]; then 
+        mv ${LSWSVCONF}/wordpress ${LSWSVCONF}/joomla  
+    fi
+    sed -i "s/wordpress/joomla/g" ${LSWSCONF}
+    echoG 'Finish Web Server config'
 }
 
-install_typo3() {
+
+landing_pg(){
+    echoG 'Setting Landing Page'
+    curl -s https://raw.githubusercontent.com/litespeedtech/ls-cloud-image/master/Static/joomla-landing.html \
+    -o ${DOCLAND}/index.html
+    if [ -e ${DOCLAND}/index.html ]; then 
+        echoG 'Landing Page finished'
+    else
+        echoR "Please check Landing Page here ${DOCLAND}/index.html"
+    fi    
+}
+
+config_php(){
+    echoG 'Updating PHP Paremeter'
+    NEWKEY='max_execution_time = 360'
+    linechange 'max_execution_time' ${PHPINICONF} "${NEWKEY}"
+    NEWKEY='post_max_size = 64M'
+    linechange 'post_max_size' ${PHPINICONF} "${NEWKEY}"
+    NEWKEY='upload_max_filesize = 64M'
+    linechange 'upload_max_filesize' ${PHPINICONF} "${NEWKEY}"
+    echoG 'Finish PHP Paremeter'
+}
+
+update_final_permission(){
+    change_owner ${DOCHM}
+    change_owner /tmp/lshttpd/lsphp.sock*
+    rm -f /tmp/lshttpd/.rtreport 
+    rm -f /tmp/lshttpd/.status
+}
+
+config_mysql(){
+    echoG 'Setting DataBase'
+    get_sql_ver
+    if [ -f ${DBPASSPATH} ]; then 
+        EXISTSQLPASS=$(grep root_mysql_passs ${HMPATH}/.db_password | awk -F '"' '{print $2}'); 
+    fi    
+    if [ "${EXISTSQLPASS}" = '' ]; then
+        if (( ${SQL_MAINV} >=10 )) && (( ${SQL_SECV} >=4 )); then
+            "${mysql}" -u root -p${root_mysql_pass} \
+                -e "ALTER USER root@localhost IDENTIFIED VIA mysql_native_password USING PASSWORD('${root_mysql_pass}');"
+        else
+            "${mysql}" -u root -p${root_mysql_pass} \
+                -e "update mysql.user set authentication_string=password('${root_mysql_pass}') where user='root';"
+        fi    
+    else
+        if (( ${SQL_MAINV} >=10 )) && (( ${SQL_SECV} >=4)); then
+            "${mysql}" -u root -p${EXISTSQLPASS} \
+                -e "ALTER USER root@localhost IDENTIFIED VIA mysql_native_password USING PASSWORD('${root_mysql_pass}');"
+        else        
+            "${mysql}" -u root -p${EXISTSQLPASS} \     
+                -e "update mysql.user set authentication_string=password('${root_mysql_pass}') where user='root';" 
+        fi        
+    fi
+    if [ ! -e ${MARIADBCNF} ]; then 
+    touch ${MARIADBCNF}
+    cat > ${MARIADBCNF} <<END 
+[mysqld]
+sql_mode="NO_ENGINE_SUBSTITUTION,NO_AUTO_CREATE_USER"
+END
+    fi
+    systemctl daemon-reload > /dev/null 2>&1
+    systemctl restart mariadb > /dev/null
+    echoG 'Finish DataBase'
+}
+
+set_htaccess(){
+    if [ ! -f ${DOCHM}/public/.htaccess ]; then 
+        touch ${DOCHM}/public/.htaccess
+    fi   
+    cat << EOM > ${DOCHM}/public/.htaccess
+<IfModule LiteSpeed>
+RewriteEngine On
+RewriteRule ^(?:fileadmin/|typo3conf/|typo3temp/|uploads/|favicon\.ico|robots\.txt) - [L]
+RewriteRule ^(?:typo3/|index\.php)(?:$|/) - [L]
+RewriteRule .* index.php [L]
+</IfModule>
+EOM
+}
+
+db_password_file(){
+    echoG 'Create db fiile'
+    if [ -f ${DBPASSPATH} ]; then 
+        echoY "${DBPASSPATH} already exist!, will recreate a new file"
+        rm -f ${DBPASSPATH}
+    fi    
+    touch "${DBPASSPATH}"
+    cat >> "${DBPASSPATH}" <<EOM
+root_mysql_pass="${root_mysql_pass}"
+EOM
+    echoG 'Finish db fiile'
+}
+
+install_typo3(){
   rm -rf "$SITE_DIR"
   mkdir -p "$SITE_DIR"
 
@@ -143,108 +510,169 @@ install_typo3() {
   chown -R nobody:nogroup "$SITE_DIR/public/fileadmin" "$SITE_DIR/var"
 }
 
-configure_virtual_host() {
-  local vhost_conf="/usr/local/lsws/conf/vhosts/localhost/vhconf.conf"
-  mkdir -p /usr/local/lsws/conf/vhosts/localhost
 
-  cat >"$vhost_conf" <<EOF
-docRoot                   ${SITE_DIR}/public/
-enableGzip                1
-
-index  {
-  useServer               0
-  indexFiles              index.php, index.html
+rm_wordpress(){
+    echoG 'Remove WordPress'
+    rm -rf ${DOCHM}/*
+    rm -f ${DOCHM}/.htaccess
 }
 
-context / {
-  allowBrowse             1
-  rewrite  {
-    enable                1
-    autoLoadHtaccess      1
-  }
-  addDefaultCharset       off
+
+ubuntu_firewall_add(){
+    echoG 'Setting Firewall'
+    for PORT in ${FIREWALLLIST}; do
+        ufw allow ${PORT} > /dev/null 2>&1
+    done    
+    echo "y" | ufw enable > /dev/null 2>&1 
+    ufw status | grep '80.*ALLOW' > /dev/null 2>&1
+    if [ ${?} = 0 ]; then 
+        echoG 'firewalld rules setup success'
+    else 
+        echoR 'Please check ufw rules'    
+    fi
 }
 
-rewrite  {
-  enable                  1
-  autoLoadHtaccess        1
-}
-EOF
-}
-
-secure_typo3_dirs() {
-  cat >"${SITE_DIR}/public/.htaccess" <<'EOF'
-<IfModule LiteSpeed>
-RewriteEngine On
-RewriteRule ^(?:fileadmin/|typo3conf/|typo3temp/|uploads/|favicon\.ico|robots\.txt) - [L]
-RewriteRule ^(?:typo3/|index\.php)(?:$|/) - [L]
-RewriteRule .* index.php [L]
-</IfModule>
-EOF
-}
-
-start_services() {
-  systemctl enable mariadb lsws
-  systemctl restart mariadb
-  /usr/local/lsws/bin/lswsctrl restart
+centos_firewall_add(){
+    echoG 'Setting Firewall'
+    if [ ! -e /usr/sbin/firewalld ]; then 
+        yum -y install firewalld > /dev/null 2>&1
+    fi
+    service firewalld start  > /dev/null 2>&1
+    systemctl enable firewalld > /dev/null 2>&1
+    for PORT in ${FIREWALLLIST}; do 
+        firewall-cmd --permanent --add-port=${PORT}/tcp > /dev/null 2>&1
+    done 
+    firewall-cmd --reload > /dev/null 2>&1
+    firewall-cmd --list-all | grep 80 > /dev/null 2>&1
+    if [ ${?} = 0 ]; then 
+        echoG 'firewalld rules setup success'
+    else 
+        echoR 'Please check firewalld rules'    
+    fi  
+    if [ ${PROVIDER} = 'oracle' ]; then 
+        oci_iptables
+    fi           
 }
 
-print_summary() {
-  local ip
-  ip="$(hostname -I | awk '{print $1}')"
-
-  cat <<EOF
-
-OpenLiteSpeed + TYPO3 setup complete.
-
-Site URL:
-  http://${DOMAIN}
-  http://${ip}
-
-TYPO3 install tool:
-  http://${DOMAIN}/typo3/install.php
-
-Database:
-  Name: ${DB_NAME}
-  User: ${DB_USER}
-  Pass: ${DB_PASS}
-
-Web root:
-  ${SITE_DIR}/public
-
-OpenLiteSpeed admin:
-  http://${ip}:7080
-  Username: admin
-  Password: (set with /usr/local/lsws/admin/misc/admpass.sh)
-EOF
+ubuntu_service_check(){
+    check_sql_ver
+    for ITEM in lsws mariadb
+    do 
+        service ${ITEM} status | grep "active\|running" > /dev/null 2>&1
+        if [ $? = 0 ]; then 
+            echoG "Process ${ITEM} is active"
+        else
+            echoR "Please check Process ${ITEM}" 
+            ALLERRORS=1
+        fi
+    done        
+    if [[ "${ALLERRORS}" = 0 ]]; then 
+        echoG "Congratulations! Installation finished."
+    else
+        echoR "Some errors seem to have occured, please check this as you may need to manually fix them"
+    fi        
 }
 
-main() {
-  log "Configuring OpenLiteSpeed repository"
-  configure_ols_repo
-
-  log "Installing OpenLiteSpeed, PHP, MariaDB, and utilities"
-  install_packages
-
-  log "Configuring OpenLiteSpeed PHP handler"
-  configure_php_handler
-
-  log "Configuring MariaDB database/user for TYPO3"
-  configure_db
-
-  log "Installing TYPO3"
-  install_typo3
-
-  log "Configuring OpenLiteSpeed virtual host"
-  configure_virtual_host
-
-  log "Adding TYPO3 rewrite rules"
-  secure_typo3_dirs
-
-  log "Starting services"
-  start_services
-
-  print_summary
+centos_service_check(){
+    check_sql_ver
+    for ITEM in lsws mariadb
+    do 
+        service ${ITEM} status | grep "active\|running" > /dev/null 2>&1
+        if [ $? = 0 ]; then 
+            echoG "Process ${ITEM} is active"
+        else
+            echoR "Please check Process ${ITEM}" 
+            ALLERRORS=1
+        fi
+    done        
+    if [[ "${ALLERRORS}" = 0 ]]; then 
+        echoG "Congratulations! Installation finished."
+    else
+        echoR "Some errors seem to have occured, please check this as you may need to manually fix them"
+    fi        
 }
 
-main "$@"
+init_check(){
+    START_TIME="$(date -u +%s)"
+    check_os
+    providerck
+    oshmpath
+}
+
+init_setup(){
+    system_upgrade
+    prepare
+}   
+
+centos_main_install(){
+    centos_install_basic
+    centos_install_ols
+    centos_install_php
+    centos_install_certbot
+    install_phpmyadmin
+    landing_pg
+}
+
+centos_main_config(){
+    centos_config_ols
+    config_php
+    typo3_main_config
+}
+
+ubuntu_main_install(){
+    ubuntu_install_basic
+    ubuntu_install_ols
+    ubuntu_install_php
+    ubuntu_install_certbot
+    ubuntu_install_postfix
+    install_phpmyadmin
+    landing_pg
+}
+
+ubuntu_main_config(){
+    ubuntu_config_ols
+    config_php 
+    typo3_main_config 
+}
+
+wp_config(){
+    install_wp_plugin
+    set_htaccess
+    get_theme_name
+    set_lscache
+}
+
+typo3_main_config(){
+    compatible_mariadb_cmd
+    config_mysql
+    rm_wordpress
+    install_typo3
+    db_password_file
+    update_final_permission
+    restart_lsws
+}
+
+end_message(){
+    END_TIME="$(date -u +%s)"
+    ELAPSED="$((${END_TIME}-${START_TIME}))"
+    echoY "***Total of ${ELAPSED} seconds to finish process***"
+}
+
+main(){
+    init_check
+    init_setup
+    if [ ${OSNAME} = 'centos' ]; then
+        centos_main_install
+        centos_main_config
+        centos_firewall_add
+        centos_service_check
+    else
+        ubuntu_main_install
+        ubuntu_main_config
+        ubuntu_firewall_add
+        ubuntu_service_check
+    fi
+    end_message
+}
+main
+exit 0
