@@ -3,13 +3,13 @@ set -euo pipefail
 
 function usage
 {
+    echo 'Setup OpenLiteSpeed with Typo3 CMS.'
     echo 'Usage:'
     echo '  bash typo3setup.sh'
-    echo "  DB_NAME=typo3db DB_USER=typo3user DB_PASS='StrongPass' DOMAIN=example.com bash typo3setup.sh"
     echo '  bash typo3setup.sh -H | --help'
 }
 
-if [[ "${1:-}" = "-H" || "${1:-}" = "--help" ]]; then
+if [[ "${1:-}" = "-H" || "${1:-}" = "-h" || "${1:-}" = "--help" ]]; then
     usage
     exit 0
 fi
@@ -48,6 +48,9 @@ FIREWALLLIST="22 80 443"
 USER='www-data'
 GROUP='www-data'
 root_mysql_pass=$(openssl rand -hex 24)
+USERPASSWORD=$(openssl rand -hex 24)
+DB_NAME=typo3
+DB_USER=typo3
 ALLERRORS=0
 EXISTSQLPASS=''
 NOWPATH=$(pwd)
@@ -225,9 +228,9 @@ install_ols_wp(){
     --wordpress \
     --wordpresspath ${DOCHM} \
     --dbrootpassword ${root_mysql_pass} \
-    --dbname typo3 \
-    --dbuser typo3 \
-    --dbpassword typo3
+    --dbname ${DB_NAME} \
+    --dbuser ${DB_USER} \
+    --dbpassword ${USERPASSWORD}
     rm -f ols1clk.sh
     wp_conf_path
     rm_dummy
@@ -413,6 +416,27 @@ context /phpmyadmin/ {
   }
 }
 
+context /typo3/ {
+  location                ${DOCLAND}/public/typo3
+  allowBrowse             1
+
+  accessControl  {
+    allow                 *
+  }
+
+  rewrite  {
+    enable                1
+    inherit               1
+
+  }
+  addDefaultCharset       off
+
+  phpIniOverride  {
+
+  }
+}
+
+
 rewrite  {
   enable                1
   autoLoadHtaccess        1
@@ -445,8 +469,8 @@ config_php(){
     linechange 'post_max_size' ${PHPINICONF} "${NEWKEY}"
     NEWKEY='upload_max_filesize = 64M'
     linechange 'upload_max_filesize' ${PHPINICONF} "${NEWKEY}"
-    NEWKEY='max_inputs_vars = 1500'
-    linechange 'max_input_vars' ${PHPINICONF} "${NEWKEY}"    
+    NEWKEY='max_input_vars = 1500'
+    linechange ';max_input_vars' ${PHPINICONF} "${NEWKEY}"    
     echoG 'Finish PHP Paremeter'
 }
 
@@ -494,14 +518,15 @@ END
 
 set_htaccess(){
     if [ ! -f ${DOCLAND}/public/.htaccess ]; then
+        echoG 'Create htaccess file'
         touch ${DOCLAND}/public/.htaccess
-    fi   
+    fi
     cat << EOM > ${DOCLAND}/public/.htaccess
-<IfModule LiteSpeed>
+<IfModule mod_rewrite.c>
 RewriteEngine On
-RewriteRule ^(?:fileadmin/|typo3conf/|typo3temp/|uploads/|favicon\.ico|robots\.txt) - [L]
-RewriteRule ^(?:typo3/|index\.php)(?:$|/) - [L]
-RewriteRule .* index.php [L]
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule ^.*$ index.php [L]
 </IfModule>
 EOM
 }
@@ -515,6 +540,7 @@ db_password_file(){
     touch "${DBPASSPATH}"
     cat >> "${DBPASSPATH}" <<EOM
 root_mysql_pass="${root_mysql_pass}"
+typo3_mysql_pass="${USERPASSWORD}"
 EOM
     echoG 'Finish db fiile'
 }
@@ -522,21 +548,15 @@ EOM
 install_typo3(){
   rm -rf "$SITE_DIR"
   mkdir -p "$SITE_DIR"
-
   require_cmd composer
-
   cd "$SITE_DIR"
   export COMPOSER_ALLOW_SUPERUSER=1
   ${LSWSFD}/lsphp${PHPVER}/bin/php /usr/local/bin/composer \
     create-project typo3/cms-base-distribution:"${TYPO3_VERSION}" . --no-interaction
-
-  chown -R ${USER}:${GROUP} "$SITE_DIR"
-  find "$SITE_DIR" -type d -exec chmod 755 {} \;
-  find "$SITE_DIR" -type f -exec chmod 644 {} \;
-
   mkdir -p "$SITE_DIR/public/fileadmin" "$SITE_DIR/var"
-  touch "$SITE_DIR/public/FIRST_INSTALL"
-  chown -R ${USER}:${GROUP} "$SITE_DIR/public/fileadmin" "$SITE_DIR/var"
+  find "$SITE_DIR" -type d -exec chmod 755 {} \;
+  #touch "$SITE_DIR/public/FIRST_INSTALL"
+  chown -R ${USER}:${GROUP} $SITE_DIR
 }
 
 
@@ -676,7 +696,7 @@ typo3_main_config(){
     rm_wordpress
     ensure_composer
     install_typo3
-    #set_htaccess
+    set_htaccess
     db_password_file
     update_final_permission
     restart_lsws
@@ -686,6 +706,8 @@ end_message(){
     END_TIME="$(date -u +%s)"
     ELAPSED="$((${END_TIME}-${START_TIME}))"
     echoY "***Total of ${ELAPSED} seconds to finish process***"
+    echoY "typo3 DB Username: ${DB_NAME}, DB password: ${USERPASSWORD}"
+    echoY "Run /var/www/html/vendor/bin/typo3 setup" command to finish the setup.
 }
 
 main(){
