@@ -21,11 +21,6 @@ fi
 
 export DEBIAN_FRONTEND=noninteractive
 
-
-# /********************************************************************
-# LiteSpeed WordPress setup Script
-# @Author:   LiteSpeed Technologies, Inc. (https://www.litespeedtech.com)
-# *********************************************************************/
 LSWSFD='/usr/local/lsws'
 DOCHM='/var/www/html.old'
 DOCLAND='/var/www/html'
@@ -43,7 +38,6 @@ PHP_SV=$(cut -d "." -f2 <<< ${PHPVER})
 PHPINICONF="${LSWSFD}/lsphp${PHPVER}/etc/php/${PHPVERD}/litespeed/php.ini"
 MARIADBSERVICE='/lib/systemd/system/mariadb.service'
 MARIADBCNF='/etc/mysql/mariadb.conf.d/60-server.cnf'
-PACKAGEJOOMA='https://downloads.joomla.org/cms/joomla6/6-0-1/Joomla_6-0-1-Stable-Full_Package.zip'
 FIREWALLLIST="22 80 443"
 USER='www-data'
 GROUP='www-data'
