@@ -701,8 +701,9 @@ end_message(){
     ELAPSED="$((${END_TIME}-${START_TIME}))"
     echoY "***Total of ${ELAPSED} seconds to finish process***"
     echoY "typo3 DB Username: ${DB_NAME}, DB password: ${USERPASSWORD}"
-    echoY "Run /var/www/html/vendor/bin/typo3 setup" command to finish the setup.
-    echoY "Run chown -R www-data:www-data /var/www/html after the setup."
+    echoY "Run ${DOCLAND}/vendor/bin/typo3 setup" command to finish the setup.
+    echoY "Run ${DOCLAND}/vendor/bin/typo3 cache:flush" command to clean up cache
+    echoY "Run chown -R www-data:www-data ${DOCLAND} after the setup."
 
 }
 
